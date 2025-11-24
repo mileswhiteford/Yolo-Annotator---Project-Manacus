@@ -131,12 +131,17 @@ class MainWindow(QMainWindow):
         self.pixmap_item = QGraphicsPixmapItem()
         self.scene.addItem(self.pixmap_item)
 
-        # FIX 2: Add the QGraphicsView widget to the layout, remove QLabel
-        self.layout.addWidget(self.view)
-
-        # Box count display
+        # Prominent box count display near the top
         self.box_count_label = QLabel("Boxes in frame: 0")
+        box_font = self.box_count_label.font()
+        box_font.setPointSize(box_font.pointSize() + 6)
+        box_font.setBold(True)
+        self.box_count_label.setFont(box_font)
+        self.box_count_label.setAlignment(Qt.AlignCenter)
         self.layout.addWidget(self.box_count_label)
+
+        # Place the view below the label
+        self.layout.addWidget(self.view)
 
         # Control Buttons
         self.btn_next = QPushButton("Next Frame >>")
@@ -204,8 +209,10 @@ class MainWindow(QMainWindow):
 
             # Update the QGraphicsPixmapItem
             self.pixmap_item.setPixmap(pixmap)
-            # Ensure the view fits the image
-            self.view.fitInView(self.pixmap_item, Qt.KeepAspectRatio) 
+            # Allow zoom to persist; only auto-fit if user has not zoomed
+            self.view.setSceneRect(self.pixmap_item.boundingRect())
+            if not self.view.user_zoomed:
+                self.view.fit_to_pixmap(self.pixmap_item)
         else:
             print("Error reading frame.")
         

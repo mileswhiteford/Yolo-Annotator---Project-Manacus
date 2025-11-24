@@ -1,5 +1,16 @@
 import sys
-from PyQt5.QtWidgets import QGraphicsRectItem, QApplication, QMainWindow, QWidget, QVBoxLayout, QPushButton, QLabel, QGraphicsView, QGraphicsScene 
+from PyQt5.QtWidgets import (
+    QGraphicsRectItem,
+    QApplication,
+    QMainWindow,
+    QWidget,
+    QVBoxLayout,
+    QPushButton,
+    QLabel,
+    QGraphicsView,
+    QGraphicsScene,
+    QGraphicsPixmapItem,
+)
 from PyQt5.QtGui import QTransform, QPen, QColor
 from PyQt5.QtCore import Qt, QRectF, pyqtSignal, QPointF
 
@@ -15,14 +26,28 @@ class AnnotationView(QGraphicsView):
         self.start_point = QPointF()
         self.temp_rect = None 
         self.setFocusPolicy(Qt.StrongFocus)
+        self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
+        self.setResizeAnchor(QGraphicsView.AnchorUnderMouse)
+        self._zoom_steps = 0
+        self.user_zoomed = False
+
+    def fit_to_pixmap(self, pixmap_item: QGraphicsPixmapItem):
+        """Reset zoom to fit the provided pixmap."""
+        if pixmap_item and not pixmap_item.pixmap().isNull():
+            self.user_zoomed = False
+            self._zoom_steps = 0
+            self.resetTransform()
+            self.fitInView(pixmap_item, Qt.KeepAspectRatio)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            # Check if we are starting a new draw operation
-            if not self.scene().itemAt(event.pos(), QTransform()): # Check if clicked on empty space
+            scene_pos = self.mapToScene(event.pos())
+            clicked_item = self.scene().itemAt(scene_pos, QTransform())
+            # Allow drawing when clicking empty space or the background pixmap
+            if clicked_item is None or isinstance(clicked_item, QGraphicsPixmapItem):
                 self.drawing = True
-                self.start_point = self.mapToScene(event.pos())
-                
+                self.start_point = scene_pos
+
                 # Create and add a temporary rectangle for drawing
                 self.temp_rect = QGraphicsRectItem(QRectF(self.start_point, self.start_point))
                 self.temp_rect.setPen(QPen(QColor(0, 255, 0), 2, Qt.DashLine)) # Green dashed line
@@ -60,7 +85,7 @@ class AnnotationView(QGraphicsView):
             
             event.accept()
             return
-            
+
         super().mouseReleaseEvent(event)
 
     def keyPressEvent(self, event):
@@ -77,3 +102,24 @@ class AnnotationView(QGraphicsView):
             event.accept()
             return
         super().keyPressEvent(event)
+
+    def wheelEvent(self, event):
+        if event.angleDelta().y() == 0:
+            super().wheelEvent(event)
+            return
+
+        zoom_in_factor = 1.15
+        zoom_out_factor = 1 / zoom_in_factor
+
+        if event.angleDelta().y() > 0 and self._zoom_steps < 20:
+            zoom_factor = zoom_in_factor
+            self._zoom_steps += 1
+        elif event.angleDelta().y() < 0 and self._zoom_steps > -10:
+            zoom_factor = zoom_out_factor
+            self._zoom_steps -= 1
+        else:
+            return
+
+        self.scale(zoom_factor, zoom_factor)
+        self.user_zoomed = True
+        event.accept()
