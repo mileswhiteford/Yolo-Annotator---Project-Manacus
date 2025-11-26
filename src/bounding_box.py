@@ -1,6 +1,24 @@
 from PyQt5.QtWidgets import QGraphicsRectItem, QGraphicsItem
 from PyQt5.QtGui import QPen, QBrush, QColor, QCursor
 from PyQt5.QtCore import QRectF, Qt, QPointF
+import hashlib
+
+def generate_color_for_id(object_id):
+    """Generate a unique color for each object ID using a hash-based approach."""
+    if object_id is None:
+        return (255, 0, 0)  # Default red for untracked objects
+    # Use hash to get consistent colors for the same ID
+    hash_obj = hashlib.md5(str(object_id).encode())
+    hash_int = int(hash_obj.hexdigest(), 16)
+    # Generate RGB values (avoid too dark colors for visibility)
+    r = (hash_int & 0xFF0000) >> 16
+    g = (hash_int & 0x00FF00) >> 8
+    b = hash_int & 0x0000FF
+    # Ensure minimum brightness
+    r = max(r, 100)
+    g = max(g, 100)
+    b = max(b, 100)
+    return (r, g, b)
 
 class BoundingBoxItem(QGraphicsRectItem):
     """
@@ -12,16 +30,28 @@ class BoundingBoxItem(QGraphicsRectItem):
     HANDLE_MARGIN = 6
     MIN_SIZE = 4
 
-    def __init__(self, rect: QRectF, class_id: int = DEFAULT_CLASS_ID, parent=None):
+    def __init__(self, rect: QRectF, class_id: int = DEFAULT_CLASS_ID, object_id: int = None, parent=None, is_highlighted: bool = False):
         super().__init__(rect, parent)
         
-        self.class_id = class_id 
+        self.class_id = class_id
+        self.object_id = object_id
+        self.is_highlighted = is_highlighted
+        
+        # Generate color based on object_id
+        r, g, b = generate_color_for_id(object_id)
+        self.base_color = QColor(r, g, b)
+        
         self.setFlags(QGraphicsItem.ItemIsSelectable | 
                       QGraphicsItem.ItemIsMovable | 
                       QGraphicsItem.ItemSendsGeometryChanges)
 
-        self.setPen(QPen(QColor(255, 0, 0), 2)) 
-        self.setBrush(QBrush(Qt.transparent))
+        self.setPen(QPen(self.base_color, 2))
+        # Set brush based on highlight state
+        if is_highlighted:
+            highlight_color = QColor(r, g, b, 64)  # Alpha 0.25 (64/255)
+            self.setBrush(QBrush(highlight_color))
+        else:
+            self.setBrush(QBrush(Qt.transparent))
         
         self.is_resizing = False
         self.initial_rect = rect 
@@ -29,6 +59,16 @@ class BoundingBoxItem(QGraphicsRectItem):
         self.resize_start_pos = QPointF()
 
         self.setAcceptHoverEvents(True)
+    
+    def set_highlighted(self, highlighted: bool):
+        """Update the highlight state of the box."""
+        self.is_highlighted = highlighted
+        if highlighted:
+            r, g, b = self.base_color.red(), self.base_color.green(), self.base_color.blue()
+            highlight_color = QColor(r, g, b, 64)  # Alpha 0.25
+            self.setBrush(QBrush(highlight_color))
+        else:
+            self.setBrush(QBrush(Qt.transparent))
 
 
     def itemChange(self, change, value):
@@ -39,9 +79,11 @@ class BoundingBoxItem(QGraphicsRectItem):
         
         if change == QGraphicsItem.ItemSelectedChange:
             if value == True:
-                self.setPen(QPen(QColor(255, 255, 0), 3)) # Yellow border when selected
+                # Yellow border when selected, but slightly thicker
+                self.setPen(QPen(QColor(255, 255, 0), 3))
             else:
-                self.setPen(QPen(QColor(255, 0, 0), 2))
+                # Return to object-specific color
+                self.setPen(QPen(self.base_color, 2))
         
         if change == QGraphicsItem.ItemPositionChange:
             # Value holds the new proposed position (QPointF)
