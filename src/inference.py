@@ -14,6 +14,7 @@ class YOLOInferenceRunner:
     detections as individual YOLO-format .txt files (normalized coordinates)
     for use in an annotation tool.
     """
+    # What up
 
     def __init__(self, yolo_weights_path: str):
         """Initializes the YOLO model."""
