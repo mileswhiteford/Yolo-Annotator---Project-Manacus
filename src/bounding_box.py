@@ -1,24 +1,18 @@
 from PyQt5.QtWidgets import QGraphicsRectItem, QGraphicsItem
 from PyQt5.QtGui import QPen, QBrush, QColor, QCursor
 from PyQt5.QtCore import QRectF, Qt, QPointF
-import hashlib
+import colorsys
 
 def generate_color_for_id(object_id):
-    """Generate a unique color for each object ID using a hash-based approach."""
+    """Generate a unique, visually distinct color per object ID using HSV spacing."""
     if object_id is None:
         return (255, 0, 0)  # Default red for untracked objects
-    # Use hash to get consistent colors for the same ID
-    hash_obj = hashlib.md5(str(object_id).encode())
-    hash_int = int(hash_obj.hexdigest(), 16)
-    # Generate RGB values (avoid too dark colors for visibility)
-    r = (hash_int & 0xFF0000) >> 16
-    g = (hash_int & 0x00FF00) >> 8
-    b = hash_int & 0x0000FF
-    # Ensure minimum brightness
-    r = max(r, 100)
-    g = max(g, 100)
-    b = max(b, 100)
-    return (r, g, b)
+    # Spread hues using golden ratio to avoid repeats and keep saturation high (avoid grays)
+    hue = (object_id * 0.61803398875) % 1.0
+    sat = 0.85
+    val = 0.95
+    r, g, b = colorsys.hsv_to_rgb(hue, sat, val)
+    return (int(r * 255), int(g * 255), int(b * 255))
 
 class BoundingBoxItem(QGraphicsRectItem):
     """

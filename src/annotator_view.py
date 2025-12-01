@@ -104,22 +104,5 @@ class AnnotationView(QGraphicsView):
         super().keyPressEvent(event)
 
     def wheelEvent(self, event):
-        if event.angleDelta().y() == 0:
-            super().wheelEvent(event)
-            return
-
-        zoom_in_factor = 1.15
-        zoom_out_factor = 1 / zoom_in_factor
-
-        if event.angleDelta().y() > 0 and self._zoom_steps < 20:
-            zoom_factor = zoom_in_factor
-            self._zoom_steps += 1
-        elif event.angleDelta().y() < 0 and self._zoom_steps > -10:
-            zoom_factor = zoom_out_factor
-            self._zoom_steps -= 1
-        else:
-            return
-
-        self.scale(zoom_factor, zoom_factor)
-        self.user_zoomed = True
-        event.accept()
+        # Disable wheel-based zoom so scrolling is exclusive to the timeline view
+        event.ignore()
