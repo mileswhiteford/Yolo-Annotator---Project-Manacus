@@ -1,6 +1,6 @@
 # YOLO Video Annotator
 
-A PyQt5 tool for running YOLO inference on a video, reviewing/editing bounding boxes, and exporting YOLO-formatted datasets. It can read a local video or download one from Box on launch.
+A PyQt5 tool for running YOLO inference on a video, reviewing/editing bounding boxes, and exporting YOLO-formatted datasets. It can read a local video or download one from Box.
 
 ## Project layout
 - `src/` — application code (`annotator_app.py`, `annotator_view.py`, `bounding_box.py`, `inference.py`, `box_downloader.py`)
