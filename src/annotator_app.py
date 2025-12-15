@@ -183,8 +183,11 @@ class ObjectTimelineView(QGraphicsView):
     def _redraw(self):
         self.scene_obj.clear()
         self.bar_geometries = []
-        # Minimal fixed margin; IDs not rendered
-        self.left_margin = 12
+        fm = QFontMetrics(QFont())
+        max_id = max(self.presence.keys()) if self.presence else 0
+        label_width = fm.boundingRect(f"ID {max_id}").width() + 12
+        # Margin wide enough for labels; minimum keeps layout stable
+        self.left_margin = max(70, label_width)
         self.base_width = max(200, self.viewport().width() - self.left_margin - 20)
         self.timeline_width = max(200, self.base_width * self.zoom_factor)
         scale = self.timeline_width / float(max(self.total_frames - 1, 1))
@@ -195,9 +198,20 @@ class ObjectTimelineView(QGraphicsView):
             frames = sorted(self.presence[obj_id])
             if not frames:
                 continue
+            # Draw object ID label at start of row
+            base_font = QFont()
+            label_font = QFont(base_font)
             r, g, b = generate_color_for_id(obj_id)
             color = QColor(r, g, b)
             is_selected = obj_id in self.selected_object_ids
+            if is_selected:
+                label_font.setBold(True)
+                label_color = color.lighter(130)
+            else:
+                label_color = color
+            label_item = self.scene_obj.addText(f"ID {obj_id}", label_font)
+            label_item.setDefaultTextColor(label_color)
+            label_item.setPos(4, y - 2)
             # Muted, softer colors
             base_color = color.lighter(120)
             pen_color = base_color.lighter(120) if is_selected else base_color
@@ -493,10 +507,11 @@ class ObjectTimelineView(QGraphicsView):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, video_path, yolo_weights):
+    def __init__(self, video_path, yolo_weights, save_video=False):
         super().__init__()
         self.setWindowTitle("YOLO Video Annotator")
         self.setFocusPolicy(Qt.StrongFocus)
+        self.save_video = save_video
 
         # --- 1. Video and YOLO Setup ---
         self.video_path = video_path
@@ -596,6 +611,10 @@ class MainWindow(QMainWindow):
         self.merge_button.setEnabled(False)
         self.merge_button.clicked.connect(self.merge_selected_objects)
         button_layout.addWidget(self.merge_button)
+        self.merge_all_button = QPushButton("Merge All")
+        self.merge_all_button.setEnabled(len(self.all_object_ids) > 1)
+        self.merge_all_button.clicked.connect(self.merge_all_objects)
+        button_layout.addWidget(self.merge_all_button)
         
         self.delete_object_button = QPushButton("Delete from Frame")
         self.delete_object_button.setEnabled(False)
@@ -704,6 +723,11 @@ class MainWindow(QMainWindow):
             self.data_dirty = False
             self._update_save_button_label()
 
+    def update_merge_all_button_state(self):
+        """Enable merge-all when multiple object IDs exist."""
+        if hasattr(self, "merge_all_button"):
+            self.merge_all_button.setEnabled(len(self.all_object_ids) > 1)
+
     def _determine_draw_object_id(self):
         """Return the object_id to use when drawing a new box."""
         if self.timeline_selected_segments:
@@ -713,15 +737,16 @@ class MainWindow(QMainWindow):
         return None
 
     def save_current_annotations(self):
-        # Clear the old list for the current frame
+        """Persist current frame's boxes from the scene into the annotations list."""
         previous = list(self.annotations[self.current_frame_index])
         new_entries = []
 
         for item in self.scene.items():
             # Check if the item is one of our custom bounding boxes
             if isinstance(item, BoundingBoxItem):
-                rect = item.rect()
-                
+                # Use scene coordinates so moves/resizes are captured
+                rect = item.mapRectToScene(item.rect())
+
                 box_data = (
                     item.object_id,
                     item.class_id,
@@ -748,7 +773,7 @@ class MainWindow(QMainWindow):
                 self.next_object_id = target_obj_id + 1
 
         # Create the permanent graphical item with chosen object_id
-        box_item = BoundingBoxItem(rect, class_id=0, object_id=target_obj_id) 
+        box_item = BoundingBoxItem(rect, class_id=0, object_id=target_obj_id, on_change=self.on_box_changed) 
         self.scene.addItem(box_item)
         
         # 3. Add the pixel coordinates to the current frame's data structure
@@ -817,10 +842,22 @@ class MainWindow(QMainWindow):
             rect_qt = QRectF(x_min, y_min, x_max - x_min, y_max - y_min)
             # Check if this object ID is selected for highlighting
             is_highlighted = obj_id in self.selected_object_ids
-            box_item = BoundingBoxItem(rect_qt, class_id=class_id, object_id=obj_id, is_highlighted=is_highlighted)
+            box_item = BoundingBoxItem(
+                rect_qt,
+                class_id=class_id,
+                object_id=obj_id,
+                is_highlighted=is_highlighted,
+                on_change=self.on_box_changed,
+            )
             self.scene.addItem(box_item)
         self.update_box_count()
         self.timeline_view.set_current_frame(self.current_frame_index)
+        self.update_merge_all_button_state()
+
+    def on_box_changed(self, _item):
+        """Autosave when a box is moved or resized."""
+        self.save_current_annotations()
+        self.refresh_timeline()
 
     def refresh_timeline(self):
         """Rebuild object timeline presence map and refresh the view."""
@@ -842,6 +879,7 @@ class MainWindow(QMainWindow):
         self.timeline_view.set_presence(presence)
         self.timeline_view.set_duplicates(duplicates)
         self.timeline_view.set_current_frame(self.current_frame_index)
+        self.update_merge_all_button_state()
 
     def on_timeline_frame_selected(self, frame_idx: int):
         """Jump to a frame when clicking the timeline."""
@@ -926,6 +964,51 @@ class MainWindow(QMainWindow):
         self.display_frame()
         self.refresh_timeline()
 
+    def export_annotated_video(self, output_video_path: str):
+        """Save a video with the current annotations drawn on each frame."""
+        export_cap = cv2.VideoCapture(self.video_path)
+        if not export_cap.isOpened():
+            print(f"Could not reopen video for export: {self.video_path}")
+            return
+
+        fps = export_cap.get(cv2.CAP_PROP_FPS) or 30.0
+        width = int(export_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(export_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+        os.makedirs(os.path.dirname(output_video_path), exist_ok=True)
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        writer = cv2.VideoWriter(output_video_path, fourcc, fps, (width, height))
+        if not writer.isOpened():
+            print(f"Could not open writer for {output_video_path}")
+            export_cap.release()
+            return
+
+        for idx in range(self.total_frames):
+            ret, frame = export_cap.read()
+            if not ret:
+                print(f"Stopped early at frame {idx} while exporting video.")
+                break
+
+            for obj_id, _, x_min, y_min, x_max, y_max in self.annotations[idx]:
+                cv2.rectangle(frame, (x_min, y_min), (x_max, y_max), (0, 255, 0), 2)
+                label = f"ID {obj_id}" if obj_id is not None else "ID ?"
+                cv2.putText(
+                    frame,
+                    label,
+                    (x_min, max(0, y_min - 6)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (0, 255, 0),
+                    1,
+                    cv2.LINE_AA,
+                )
+
+            writer.write(frame)
+
+        export_cap.release()
+        writer.release()
+        print(f"Saved annotated video to {output_video_path}")
+
     def save_dataset(self):
         """Export frames and labels in YOLO format to outputs/train_data/<video_name> directory."""
         self.save_current_annotations()
@@ -965,6 +1048,11 @@ class MainWindow(QMainWindow):
 
         export_cap.release()
         print(f"Saved dataset to {output_dir}")
+
+        if self.save_video:
+            annotated_video_path = os.path.join(output_dir, f"{video_stem}_annotated.mp4")
+            self.export_annotated_video(annotated_video_path)
+
         self.mark_clean()
 
     def keyPressEvent(self, event):        
@@ -1051,6 +1139,7 @@ class MainWindow(QMainWindow):
             self.timeline_view.set_selected_object_ids(self.selected_object_ids)
             # Refresh display to show highlights
             self.display_frame()
+        self.update_merge_all_button_state()
     
     def sync_current_frame_objects_list(self):
         """Sync selection in current frame objects list with selected_object_ids."""
@@ -1065,6 +1154,7 @@ class MainWindow(QMainWindow):
         self.merge_button.setEnabled(len(self.selected_object_ids) > 1)
         self.delete_object_button.setEnabled(has_selection)
         self.delete_id_global_button.setEnabled(has_selection)
+        self.update_merge_all_button_state()
     
     def merge_selected_objects(self):
         """Merge selected object IDs into the first selected ID."""
@@ -1099,8 +1189,36 @@ class MainWindow(QMainWindow):
         self.display_frame()
         self.refresh_timeline()
         self.mark_dirty()
+        self.update_merge_all_button_state()
         
         print(f"Merge complete. All objects now use ID {target_id}")
+
+    def merge_all_objects(self):
+        """Merge every object ID into a single timeline (lowest ID wins)."""
+        if len(self.all_object_ids) < 2:
+            return
+
+        target_id = min(self.all_object_ids)
+        ids_to_merge = set(self.all_object_ids) - {target_id}
+        print(f"Merging all object IDs {ids_to_merge} into {target_id}")
+
+        for frame_idx in range(self.total_frames):
+            for i, (obj_id, class_id, x_min, y_min, x_max, y_max) in enumerate(self.annotations[frame_idx]):
+                if obj_id in ids_to_merge:
+                    self.annotations[frame_idx][i] = (target_id, class_id, x_min, y_min, x_max, y_max)
+
+        self.all_object_ids = {target_id}
+        self.selected_object_ids.clear()
+        self.merge_button.setEnabled(False)
+        self.delete_object_button.setEnabled(False)
+        self.delete_id_global_button.setEnabled(False)
+        self.timeline_view.set_selected_object_ids(self.selected_object_ids)
+
+        self.display_frame()
+        self.refresh_timeline()
+        self.mark_dirty()
+        self.update_merge_all_button_state()
+        print(f"Merge-all complete. All objects now use ID {target_id}")
     
     def delete_selected_objects_from_frame(self):
         """Delete all bounding boxes with selected object IDs from the current frame only."""
@@ -1194,6 +1312,11 @@ def main():
         required=True, 
         help='The path to the YOLO model weights file (.pt).'
     )
+    parser.add_argument(
+        '--save_video',
+        action='store_true',
+        help='Also save an annotated video with bounding boxes when saving the dataset.',
+    )
     args = parser.parse_args()
     app = QApplication(sys.argv)
     
@@ -1203,7 +1326,7 @@ def main():
         print(exc)
         sys.exit(1)
 
-    window = MainWindow(video_path=resolved_video_path, yolo_weights=args.yolo_weights) 
+    window = MainWindow(video_path=resolved_video_path, yolo_weights=args.yolo_weights, save_video=args.save_video) 
     window.show()
     sys.exit(app.exec_())
 

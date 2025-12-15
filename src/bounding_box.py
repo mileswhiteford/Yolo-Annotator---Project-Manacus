@@ -1,3 +1,5 @@
+from typing import Callable, Optional
+
 from PyQt5.QtWidgets import QGraphicsRectItem, QGraphicsItem
 from PyQt5.QtGui import QPen, QBrush, QColor, QCursor
 from PyQt5.QtCore import QRectF, Qt, QPointF
@@ -24,12 +26,21 @@ class BoundingBoxItem(QGraphicsRectItem):
     HANDLE_MARGIN = 6
     MIN_SIZE = 4
 
-    def __init__(self, rect: QRectF, class_id: int = DEFAULT_CLASS_ID, object_id: int = None, parent=None, is_highlighted: bool = False):
+    def __init__(
+        self,
+        rect: QRectF,
+        class_id: int = DEFAULT_CLASS_ID,
+        object_id: int = None,
+        parent=None,
+        is_highlighted: bool = False,
+        on_change: Optional[Callable[["BoundingBoxItem"], None]] = None,
+    ):
         super().__init__(rect, parent)
         
         self.class_id = class_id
         self.object_id = object_id
         self.is_highlighted = is_highlighted
+        self.on_change = on_change
         
         # Generate color based on object_id
         r, g, b = generate_color_for_id(object_id)
@@ -49,8 +60,10 @@ class BoundingBoxItem(QGraphicsRectItem):
         
         self.is_resizing = False
         self.initial_rect = rect 
+        self.initial_scene_rect = self.sceneBoundingRect()
         self.resize_mode = None
         self.resize_start_pos = QPointF()
+        self.initial_pos = self.pos()
 
         self.setAcceptHoverEvents(True)
     
@@ -99,9 +112,14 @@ class BoundingBoxItem(QGraphicsRectItem):
                 self.is_resizing = True
                 self.resize_mode = handle
                 self.initial_rect = QRectF(self.rect())
+                self.initial_scene_rect = self.sceneBoundingRect()
+                self.initial_pos = self.pos()
                 self.resize_start_pos = QPointF(event.pos())
                 event.accept()
                 return
+            # Track drag start for move operations
+            self.initial_scene_rect = self.sceneBoundingRect()
+            self.initial_pos = self.pos()
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
@@ -137,12 +155,18 @@ class BoundingBoxItem(QGraphicsRectItem):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        changed = False
         if self.is_resizing:
             self.is_resizing = False
             self.resize_mode = None
             self._update_cursor(None)
+            changed = self.sceneBoundingRect() != self.initial_scene_rect
             event.accept()
-            return
+        else:
+            # Regular move
+            changed = self.pos() != self.initial_pos
+        if changed and self.on_change:
+            self.on_change(self)
         super().mouseReleaseEvent(event)
 
     def _handle_at(self, pos: QPointF):
