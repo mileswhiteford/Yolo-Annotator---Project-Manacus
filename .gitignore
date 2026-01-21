@@ -23,8 +23,8 @@ dist/
 
 # Project artifacts
 outputs/
-models/*.pt
-models/**/*.pt
+models/*
+!models/.gitkeep
 data/sample_videos/
 annotations/
 test/

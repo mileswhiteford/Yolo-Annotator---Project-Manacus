@@ -17,6 +17,7 @@ Note: Requires an already pre-trained YOLO model. This pipeline is designed for 
 
 ## Setup
 ```bash
+cd Yolo-Annotator---Project-Manacus
 python -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
@@ -24,6 +25,7 @@ pip install -e .
 ```
 
 ## Quickstart
+1. Add pre-trained yolo model to "models/" folder
 1. Build the Box index cache:
    ```bash
    random-vid --annotate --count 1
