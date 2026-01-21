@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "manakin-yolo-annotator"
+version = "0.1.0"
+description = "YOLO-based annotation and curation tools for manakin videos."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.scripts]
+annotator = "manakin_yolo_annotator.annotator_app:main"
+frame-curator = "manakin_yolo_annotator.frame_curator:main"
+error-detector = "manakin_yolo_annotator.error_detector:main"
+random-vid = "manakin_yolo_annotator.random_vid:main"
+train-split = "manakin_yolo_annotator.train_split:main"
+validate-dataset = "manakin_yolo_annotator.validate_dataset:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

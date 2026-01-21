@@ -24,4 +24,9 @@ dist/
 # Project artifacts
 outputs/
 models/*.pt
+models/**/*.pt
 data/sample_videos/
+annotations/
+test/
+system_files/
+splits/

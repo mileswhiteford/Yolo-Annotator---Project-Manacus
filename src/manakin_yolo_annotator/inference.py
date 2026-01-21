@@ -71,13 +71,14 @@ class YOLOInferenceRunner:
         
         # Use track() with persist=True for object tracking across frames
         # Stream=True is efficient for video processing
-        for result in self.model.track(video_path, stream=True, persist=True):
+        for result in self.model.track(video_path, stream=True, persist=True, verbose=True, iou=0.2): 
             boxes = result.boxes
             yolo_lines = []
             
             if boxes is not None and len(boxes) > 0:
                 xyxy = boxes.xyxy.cpu().numpy()
                 cls = boxes.cls.cpu().numpy()
+                confs = boxes.conf.cpu().numpy()
                 # Extract tracking IDs (object instance IDs)
                 ids = boxes.id
                 if ids is not None:
@@ -91,6 +92,7 @@ class YOLOInferenceRunner:
                     x1, y1, x2, y2 = xyxy[i]
                     class_id = int(cls[i])
                     object_id = int(ids[i]) if ids is not None else i
+                    confidence = float(confs[i])
                     
                     # Calculate Normalized YOLO format (x_center, y_center, width, height)
                     w_pixel = x2 - x1
@@ -104,8 +106,8 @@ class YOLOInferenceRunner:
                     w_norm = w_pixel / frame_width
                     h_norm = h_pixel / frame_height
                     
-                    # Create the YOLO output line (object_id class_id x_c y_c w h)
-                    line = f"{object_id} {class_id} {xc_norm:.6f} {yc_norm:.6f} {w_norm:.6f} {h_norm:.6f}"
+                    # Create the YOLO output line (object_id class_id confidence x_c y_c w h)
+                    line = f"{object_id} {class_id} {confidence:.4f} {xc_norm:.6f} {yc_norm:.6f} {w_norm:.6f} {h_norm:.6f}"
                     yolo_lines.append(line)
                     total_detections += 1
 
@@ -124,3 +126,47 @@ class YOLOInferenceRunner:
         
         # Return the directory path where the .txt files are stored
         return yolo_dir
+
+    def run_inference_in_memory(self, video_path: str):
+        """
+        Runs YOLO inference on a video and returns per-frame detections in memory.
+
+        Returns:
+            A list where each entry is a list of tuples:
+            (object_id, class_id, x1, y1, x2, y2, confidence)
+        """
+        if not os.path.exists(video_path):
+            raise FileNotFoundError(f"Video file not found: {video_path}")
+
+        frame_results = []
+        total_detections = 0
+        frame_idx = 0
+
+        for result in self.model.track(video_path, stream=True, persist=True, verbose=True, iou=0.2):
+            boxes = result.boxes
+            frame_boxes = []
+            if boxes is not None and len(boxes) > 0:
+                xyxy = boxes.xyxy.cpu().numpy()
+                cls = boxes.cls.cpu().numpy()
+                confs = boxes.conf.cpu().numpy()
+                ids = boxes.id
+                if ids is not None:
+                    ids = ids.cpu().numpy()
+                else:
+                    ids = np.arange(len(xyxy))
+
+                for i in range(len(xyxy)):
+                    x1, y1, x2, y2 = xyxy[i]
+                    class_id = int(cls[i]) if cls is not None else 0
+                    object_id = int(ids[i]) if ids is not None else i
+                    confidence = float(confs[i]) if confs is not None else None
+                    frame_boxes.append((object_id, class_id, x1, y1, x2, y2, confidence))
+                    total_detections += 1
+
+            frame_results.append(frame_boxes)
+            frame_idx += 1
+
+        print(f"\n--- Inference Complete (In-Memory) ---")
+        print(f"Frames Processed: {frame_idx}")
+        print(f"Total Detections: {total_detections}")
+        return frame_results

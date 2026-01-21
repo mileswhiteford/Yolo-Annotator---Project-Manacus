@@ -1,8 +1,9 @@
 from typing import Callable, Optional
 
-from PyQt5.QtWidgets import QGraphicsRectItem, QGraphicsItem
-from PyQt5.QtGui import QPen, QBrush, QColor, QCursor
+from PyQt5.QtWidgets import QGraphicsRectItem, QGraphicsItem, QGraphicsTextItem
+from PyQt5.QtGui import QPen, QBrush, QColor, QCursor, QFont
 from PyQt5.QtCore import QRectF, Qt, QPointF
+import sip
 import colorsys
 
 def generate_color_for_id(object_id):
@@ -31,6 +32,7 @@ class BoundingBoxItem(QGraphicsRectItem):
         rect: QRectF,
         class_id: int = DEFAULT_CLASS_ID,
         object_id: int = None,
+        confidence: Optional[float] = None,
         parent=None,
         is_highlighted: bool = False,
         on_change: Optional[Callable[["BoundingBoxItem"], None]] = None,
@@ -39,6 +41,7 @@ class BoundingBoxItem(QGraphicsRectItem):
         
         self.class_id = class_id
         self.object_id = object_id
+        self.confidence = confidence
         self.is_highlighted = is_highlighted
         self.on_change = on_change
         
@@ -65,6 +68,9 @@ class BoundingBoxItem(QGraphicsRectItem):
         self.resize_start_pos = QPointF()
         self.initial_pos = self.pos()
 
+        self.conf_text_item = None
+        self._update_confidence_label()
+
         self.setAcceptHoverEvents(True)
     
     def set_highlighted(self, highlighted: bool):
@@ -76,6 +82,11 @@ class BoundingBoxItem(QGraphicsRectItem):
             self.setBrush(QBrush(highlight_color))
         else:
             self.setBrush(QBrush(Qt.transparent))
+
+    def set_confidence(self, confidence: Optional[float]):
+        """Update displayed confidence for the box."""
+        self.confidence = confidence
+        self._update_confidence_label()
 
 
     def itemChange(self, change, value):
@@ -149,12 +160,15 @@ class BoundingBoxItem(QGraphicsRectItem):
 
             self.prepareGeometryChange()
             self.setRect(new_rect)
+            self._position_confidence_label()
             event.accept()
             return
 
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if sip.isdeleted(self):
+            return
         changed = False
         if self.is_resizing:
             self.is_resizing = False
@@ -167,7 +181,11 @@ class BoundingBoxItem(QGraphicsRectItem):
             changed = self.pos() != self.initial_pos
         if changed and self.on_change:
             self.on_change(self)
-        super().mouseReleaseEvent(event)
+        try:
+            super().mouseReleaseEvent(event)
+        except RuntimeError:
+            # Item may be deleted during rapid frame switches.
+            pass
 
     def _handle_at(self, pos: QPointF):
         """Return which handle (if any) the point is near."""
@@ -213,3 +231,40 @@ class BoundingBoxItem(QGraphicsRectItem):
             self.setCursor(QCursor(cursors.get(handle, Qt.ArrowCursor)))
         else:
             self.setCursor(QCursor(Qt.ArrowCursor))
+
+    def _format_confidence(self) -> Optional[str]:
+        if self.confidence is None:
+            return None
+        try:
+            value = float(self.confidence)
+        except (TypeError, ValueError):
+            return None
+        if value <= 1.0:
+            return f"{value:.2f}"
+        return f"{value:.1f}"
+
+    def _update_confidence_label(self):
+        text = self._format_confidence()
+        if text is None:
+            if self.conf_text_item is not None:
+                self.conf_text_item.setVisible(False)
+            return
+        if self.conf_text_item is None:
+            self.conf_text_item = QGraphicsTextItem(self)
+            self.conf_text_item.setDefaultTextColor(QColor(255, 255, 255))
+            self.conf_text_item.setFont(QFont("Arial", 24))
+            self.conf_text_item.setAcceptedMouseButtons(Qt.NoButton)
+            self.conf_text_item.setFlag(QGraphicsItem.ItemIsSelectable, False)
+            self.conf_text_item.setZValue(self.zValue() + 1)
+        self.conf_text_item.setHtml(
+            f'<span style="background-color: rgba(0, 0, 0, 180); padding: 4px 10px;">{text}</span>'
+        )
+        self.conf_text_item.setVisible(True)
+        self._position_confidence_label()
+
+    def _position_confidence_label(self):
+        if self.conf_text_item is None:
+            return
+        rect = self.rect()
+        padding = 6
+        self.conf_text_item.setPos(rect.right() + padding, rect.top() + padding)

@@ -8,16 +8,20 @@ to the current working directory but can be overridden when instantiating BoxNav
 
 from __future__ import annotations
 
+import json
 import os
 import time
 import shutil
 import requests
-from typing import Optional, Dict
+from typing import Optional, Dict, List, Tuple, TYPE_CHECKING
 
 from moviepy.video.io.VideoFileClip import VideoFileClip
 
+if TYPE_CHECKING:  # for type checkers, without forcing runtime dependency
+    from IPython.display import Audio as _IPyAudio, display as _ipy_display, clear_output as _ipy_clear_output
+
 try:  # Optional; available in notebooks but not required elsewhere
-    from IPython.display import Audio, display, clear_output
+    from IPython.display import Audio, display, clear_output  # type: ignore
 except ImportError:  # pragma: no cover - fallback when IPython is missing
     Audio = None
 
@@ -33,15 +37,24 @@ class BoxNavigator:
     """
     Lightweight Box client powered by the REST API + Developer Token.
 
-    - Credentials live under ``<base_dir>/system_files/box_credentials.txt``
-    - Files download into ``<base_dir>/Downloaded_Videos``
-    - Provide ``base_dir`` to control where downloads/creds are stored
+    - Credentials live under ``<system_files_dir>/box_credentials.txt``
+    - Files download into ``<download_dir>``
+    - Provide ``base_dir`` to control defaults when explicit dirs are not set
     """
 
-    def __init__(self, base_dir: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        base_dir: Optional[str] = None,
+        system_files_dir: Optional[str] = None,
+        download_dir: Optional[str] = None,
+    ) -> None:
         self.home_dir = os.path.abspath(base_dir or os.getcwd())
-        self.system_files_dir = os.path.join(self.home_dir, "system_files")
-        self.download_dir = os.path.join(self.home_dir, "Downloaded_Videos")
+        self.system_files_dir = os.path.abspath(system_files_dir) if system_files_dir else os.path.join(
+            self.home_dir, "system_files"
+        )
+        self.download_dir = os.path.abspath(download_dir) if download_dir else os.path.join(
+            self.home_dir, "videos"
+        )
 
         os.makedirs(self.home_dir, exist_ok=True)
         os.makedirs(self.download_dir, exist_ok=True)
@@ -56,6 +69,10 @@ class BoxNavigator:
     # ---------- Credentials ----------
     def _cred_file_path(self) -> str:
         return os.path.join(self.system_files_dir, "box_credentials.txt")
+
+    def _index_file_path(self, folder_id: str) -> str:
+        safe_id = "".join(ch for ch in folder_id if ch.isalnum() or ch in ("-", "_"))
+        return os.path.join(self.system_files_dir, f"box_index_{safe_id}.json")
 
     def load_credentials_from_file(self) -> None:
         os.makedirs(self.system_files_dir, exist_ok=True)
@@ -122,6 +139,121 @@ class BoxNavigator:
             if item.get("type") == "file" and item.get("name") == video_name:
                 return {"id": item.get("id"), "name": item.get("name"), "type": "file"}
         return None
+
+    def list_files_recursive(self, folder_id: str) -> List[Dict[str, str]]:
+        files: List[Dict[str, str]] = []
+        stack = [folder_id]
+        while stack:
+            current_id = stack.pop()
+            print(f"[box] Listing folder {current_id} ...")
+            offset = 0
+            limit = 1000
+            while True:
+                url = f"{self.base_url}/folders/{current_id}/items"
+                params = {
+                    "limit": limit,
+                    "offset": offset,
+                    "fields": "type,id,name",
+                }
+                try:
+                    data = self._request("GET", url, params=params).json()
+                except requests.HTTPError as exc:
+                    print(f"[warn] Folder list failed for {current_id}: {exc}")
+                    break
+
+                entries = data.get("entries", [])
+                total_count = data.get("total_count", 0)
+                print(f"[box] Folder {current_id}: {offset}-{offset + len(entries)} of {total_count}")
+                for item in entries:
+                    if item.get("type") == "folder":
+                        stack.append(item.get("id"))
+                    elif item.get("type") == "file":
+                        files.append({"id": item.get("id"), "name": item.get("name"), "type": "file"})
+
+                offset += len(entries)
+                if offset >= total_count or not entries:
+                    break
+        return files
+
+    def load_box_index(self, folder_id: str) -> Optional[List[Dict[str, str]]]:
+        path = self._index_file_path(folder_id)
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, json.JSONDecodeError):
+            return None
+        return data.get("files")
+
+    def build_box_index(self, folder_id: str) -> List[Dict[str, str]]:
+        files = self.list_files_recursive(folder_id)
+        payload = {
+            "folder_id": folder_id,
+            "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "files": files,
+        }
+        os.makedirs(self.system_files_dir, exist_ok=True)
+        path = self._index_file_path(folder_id)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle)
+        return files
+
+    def search_videos_in_folder(self, folder_id: str) -> List[Dict[str, str]]:
+        files: List[Dict[str, str]] = []
+        offset = 0
+        limit = 200
+        while True:
+            url = f"{self.base_url}/search"
+            params = {
+                "query": "mp4",
+                "type": "file",
+                "file_extensions": "mp4",
+                "ancestor_folder_ids": folder_id,
+                "limit": limit,
+                "offset": offset,
+                "fields": "type,id,name",
+            }
+            try:
+                data = self._request("GET", url, params=params).json()
+            except requests.HTTPError as exc:
+                print(f"[warn] Search failed for folder {folder_id}: {exc}")
+                break
+
+            entries = data.get("entries", [])
+            total_count = data.get("total_count", 0)
+            print(f"[box] Search results: {offset}-{offset + len(entries)} of {total_count}")
+            for item in entries:
+                if item.get("type") == "file":
+                    files.append({"id": item.get("id"), "name": item.get("name"), "type": "file"})
+
+            offset += len(entries)
+            if offset >= total_count or not entries:
+                break
+        return files
+
+    def search_videos_in_folder_page(
+        self, folder_id: str, limit: int = 200, offset: int = 0, query: str = "mp4"
+    ) -> Tuple[List[Dict[str, str]], int]:
+        url = f"{self.base_url}/search"
+        params = {
+            "query": query,
+            "type": "file",
+            "file_extensions": "mp4",
+            "ancestor_folder_ids": folder_id,
+            "limit": limit,
+            "offset": offset,
+            "fields": "type,id,name",
+        }
+        data = self._request("GET", url, params=params).json()
+        entries = data.get("entries", [])
+        total_count = data.get("total_count", 0)
+        files = [
+            {"id": item.get("id"), "name": item.get("name"), "type": "file"}
+            for item in entries
+            if item.get("type") == "file"
+        ]
+        return files, total_count
 
     def download_vid(self, video_name: str) -> Optional[str]:
         video_path = os.path.join(self.download_dir, video_name)
