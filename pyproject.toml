@@ -17,6 +17,7 @@ error-detector = "manakin_yolo_annotator.error_detector:main"
 random-vid = "manakin_yolo_annotator.random_vid:main"
 train-split = "manakin_yolo_annotator.train_split:main"
 validate-dataset = "manakin_yolo_annotator.validate_dataset:main"
+evaluate-model = "manakin_yolo_annotator.evaluate_model:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
