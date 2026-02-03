@@ -92,11 +92,6 @@ def analyze_video(
     if not cap.isOpened():
         print(f"[error] Could not open video {video_path}")
         return None
-    if is_grayscale_video(cap):
-        print(f"[info] Skipping grayscale video (no inference): {video_path}")
-        cap.release()
-        return None
-        
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
     fps = float(cap.get(cv2.CAP_PROP_FPS) or 30.0)
@@ -216,37 +211,6 @@ def qpixmap_from_bgr(image: np.ndarray) -> QPixmap:
     bytes_per_line = 3 * w
     qimg = QImage(image.data, w, h, bytes_per_line, QImage.Format_BGR888)
     return QPixmap.fromImage(qimg.copy())
-
-
-def is_grayscale_video(
-    cap: cv2.VideoCapture,
-    sample_count: int = 5,
-    diff_threshold: float = 0.5,
-) -> bool:
-    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-    if total <= 0:
-        return False
-
-    indices = sorted(set(
-        int(i * (total - 1) / max(sample_count - 1, 1))
-        for i in range(sample_count)
-    ))
-
-    for idx in indices:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-        ok, frame = cap.read()
-        if not ok or frame is None:
-            continue
-        if frame.ndim < 3 or frame.shape[2] < 3:
-            continue
-        b = frame[:, :, 0].astype(np.int16)
-        g = frame[:, :, 1].astype(np.int16)
-        r = frame[:, :, 2].astype(np.int16)
-        diff = (np.mean(np.abs(b - g)) + np.mean(np.abs(b - r)) + np.mean(np.abs(g - r))) / 3.0
-        if diff > diff_threshold:
-            return False
-
-    return True
 
 
 class SimpleView(QGraphicsView):
@@ -509,6 +473,11 @@ class Error_Detector(QMainWindow):
         forced_video: Optional[Path] = None,
         run_new: bool = False,
         other_split_root: Optional[Path] = None,
+        auto_random: bool = False,
+        random_folder_id: str = DEFAULT_BOX_FOLDER_ID,
+        random_rebuild_index: bool = False,
+        random_seed: Optional[int] = None,
+        random_count: int = 1,
     ):
         super().__init__()
         self.model = model
@@ -529,6 +498,11 @@ class Error_Detector(QMainWindow):
         self.flicker_len = flicker_len
         self.run_new = run_new
         self.other_split_root = other_split_root
+        self.auto_random = auto_random
+        self.random_folder_id = random_folder_id
+        self.random_rebuild_index = random_rebuild_index
+        self.random_seed = random_seed
+        self.random_count = max(1, int(random_count))
         self.video_path: Optional[Path] = None
         self.fps = 30.0
         self.playing = False
@@ -698,14 +672,21 @@ class Error_Detector(QMainWindow):
             self.forced_consumed = True
             return
 
-        while self.current_candidate_idx < len(self.candidates):
+        attempts = 0
+        max_attempts = 25
+        while attempts < max_attempts:
+            if self.current_candidate_idx >= len(self.candidates):
+                if not self._refresh_candidates():
+                    break
             name = self.candidates[self.current_candidate_idx]
             self.current_candidate_idx += 1
+            attempts += 1
             if not self._confirm_cross_split(name):
                 print("Aborted due to annotations/test conflict.")
                 raise SystemExit(1)
             path = self.navigator.download_vid(name)
-            if path is None: continue
+            if path is None:
+                continue
             analysis = analyze_video(
                 Path(path),
                 self.model,
@@ -717,6 +698,23 @@ class Error_Detector(QMainWindow):
                 return
         QMessageBox.information(self, "Done", "No more flagged videos found.")
         self.close()
+
+    def _refresh_candidates(self) -> bool:
+        if not self.auto_random:
+            return False
+        seed = self.random_seed
+        self.random_seed = None
+        self.candidates = select_random_box_video_names(
+            self.navigator,
+            count=self.random_count,
+            folder_id=self.random_folder_id,
+            rebuild_index=self.random_rebuild_index,
+            seed=seed,
+        )
+        if self.candidates:
+            random.shuffle(self.candidates)
+        self.current_candidate_idx = 0
+        return bool(self.candidates)
 
     def load_analysis(self, video_path: str, analysis: VideoAnalysisResult):
         self.video_path = Path(video_path)
@@ -1007,7 +1005,7 @@ def main():
     source_group = parser.add_mutually_exclusive_group()
     source_group.add_argument("--video-path", type=str, default=None)
     source_group.add_argument("--box-video", type=str, default=None)
-    parser.add_argument("--random-count", type=int, default=5, help="Number of random videos to sample when no video is specified.")
+    parser.add_argument("--random-count", type=int, default=1, help="Number of random videos to sample when no video is specified.")
     parser.add_argument("--folder-id", type=str, default=DEFAULT_BOX_FOLDER_ID, help="Box folder ID for random sampling.")
     parser.add_argument("--rebuild-index", action="store_true", help="Rebuild local Box index cache for the folder ID.")
     parser.add_argument("--seed", type=int, default=None, help="Optional random seed for reproducibility.")
@@ -1015,6 +1013,9 @@ def main():
     parser.add_argument("--iou-thresh", type=float, default=0.1)
     parser.add_argument("--flicker-len", type=int, default=3)
     args = parser.parse_args()
+
+    if args.seed is not None:
+        random.seed(args.seed)
 
     project_root = args.base_dir
     annotations_root = project_root / "annotations"
@@ -1032,20 +1033,21 @@ def main():
     if args.video_path:
         candidates = []
         forced_video = Path(args.video_path)
+        auto_random = False
     elif args.box_video:
         candidates = []
         forced_video = Path(args.box_video)
+        auto_random = False
     else:
         candidates = select_random_box_video_names(
             navigator,
             count=args.random_count,
             folder_id=args.folder_id,
             rebuild_index=args.rebuild_index,
-            seed=args.seed,
+            seed=None,
         )
         forced_video = None
-        if not candidates:
-            raise SystemExit("No random videos available to download.")
+        auto_random = True
 
     if output_dir.resolve().is_relative_to(annotations_root.resolve()):
         other_split_root = test_root
@@ -1060,6 +1062,11 @@ def main():
         flicker_len=args.flicker_len, forced_video=forced_video,
         run_new=args.run_new,
         other_split_root=other_split_root,
+        auto_random=auto_random,
+        random_folder_id=args.folder_id,
+        random_rebuild_index=args.rebuild_index,
+        random_seed=None,
+        random_count=args.random_count,
     )
     window.show()
     sys.exit(app.exec_())

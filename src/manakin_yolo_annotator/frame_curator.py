@@ -1,4 +1,5 @@
 import argparse
+import random
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -60,6 +61,48 @@ def sample_frames_with_yolo(video_path: Path, model: YOLO, frame_stride: int) ->
             boxes_per_frame.append(f_boxes)
         frame_idx += 1
     return frames, boxes_per_frame, sample_indices
+
+
+def is_black_and_white_video(
+    video_path: Path,
+    *,
+    sample_count: int = 6,
+    diff_threshold: float = 2.0,
+    grayscale_ratio: float = 0.8,
+) -> bool:
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        return False
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    if sample_count <= 0:
+        cap.release()
+        return False
+    step = max(total_frames // sample_count, 1) if total_frames > 0 else 1
+    grayscale_hits = 0
+    sampled = 0
+    for i in range(sample_count):
+        if total_frames > 0:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, min(i * step, total_frames - 1))
+        ret, frame = cap.read()
+        if not ret:
+            break
+        sampled += 1
+        if frame.ndim < 3 or frame.shape[2] < 3:
+            grayscale_hits += 1
+            continue
+        small = cv2.resize(frame, (64, 64), interpolation=cv2.INTER_AREA)
+        b, g, r = cv2.split(small)
+        diff = (
+            np.mean(np.abs(b.astype(np.int16) - g.astype(np.int16)))
+            + np.mean(np.abs(b.astype(np.int16) - r.astype(np.int16)))
+            + np.mean(np.abs(g.astype(np.int16) - r.astype(np.int16)))
+        ) / 3.0
+        if diff <= diff_threshold:
+            grayscale_hits += 1
+    cap.release()
+    if sampled == 0:
+        return False
+    return (grayscale_hits / sampled) >= grayscale_ratio
 
 
 def qpixmap_from_bgr(image: np.ndarray) -> QPixmap:
@@ -299,6 +342,11 @@ class FrameCurator(QMainWindow):
         forced_video: Optional[Path] = None,
         run_new: bool = False,
         other_split_root: Optional[Path] = None,
+        auto_random: bool = False,
+        random_folder_id: str = DEFAULT_BOX_FOLDER_ID,
+        random_rebuild_index: bool = False,
+        random_seed: Optional[int] = None,
+        random_count: int = 1,
         **kwargs,
     ):
         super().__init__()
@@ -314,6 +362,11 @@ class FrameCurator(QMainWindow):
         self.forced_consumed = False
         self.run_new = run_new
         self.other_split_root = other_split_root
+        self.auto_random = auto_random
+        self.random_folder_id = random_folder_id
+        self.random_rebuild_index = random_rebuild_index
+        self.random_seed = random_seed
+        self.random_count = max(1, int(random_count))
         
         self.init_ui()
         
@@ -460,20 +513,48 @@ class FrameCurator(QMainWindow):
                 else:
                     QMessageBox.warning(self, "Error", f"Could not find {target_path}")
                     return
+            if is_black_and_white_video(target_path):
+                QMessageBox.warning(self, "Skipped", f"{target_path.name} looks black-and-white. Skipping inference.")
+                return
             self._load_video(Path(target_path))
             return
 
-        while self.current_candidate_idx < len(self.candidates):
+        attempts = 0
+        max_attempts = 25
+        while attempts < max_attempts:
+            if self.current_candidate_idx >= len(self.candidates):
+                if not self._refresh_candidates():
+                    break
             name = self.candidates[self.current_candidate_idx]
             self.current_candidate_idx += 1
+            attempts += 1
             if not self._confirm_cross_split(name):
                 print("Aborted due to annotations/test conflict.")
                 raise SystemExit(1)
             path = self.navigator.download_vid(name)
-            if not path: continue
+            if not path:
+                continue
+            if is_black_and_white_video(Path(path)):
+                print(f"[skip] {name} looks black-and-white. Skipping inference.")
+                continue
             self._load_video(Path(path))
             return
         QMessageBox.information(self, "Done", "No more videos found.")
+
+    def _refresh_candidates(self) -> bool:
+        if not self.auto_random:
+            return False
+        seed = self.random_seed
+        self.random_seed = None
+        self.candidates = select_random_box_video_names(
+            self.navigator,
+            count=self.random_count,
+            folder_id=self.random_folder_id,
+            rebuild_index=self.random_rebuild_index,
+            seed=seed,
+        )
+        self.current_candidate_idx = 0
+        return bool(self.candidates)
 
     def update_view(self):
         if not self.frames: return
@@ -765,18 +846,28 @@ def main():
     source_group.add_argument("--video-path", type=str, default=None)
     source_group.add_argument("--box-video", type=str, default=None)
     parser.add_argument("--frame-stride", type=int, default=30, help="Sample every N frames.")
-    random_count = 5
+    random_count = 1
     parser.add_argument("--folder-id", type=str, default=DEFAULT_BOX_FOLDER_ID, help="Box folder ID for random sampling.")
     parser.add_argument("--rebuild-index", action="store_true", help="Rebuild local Box index cache for the folder ID.")
     parser.add_argument("--seed", type=int, default=None, help="Optional random seed for reproducibility.")
-    parser.add_argument("--run-new", action="store_true", help="Run inference without preloading saved frames.")
+    parser.add_argument("--run-new", action="store_true", help="Run inference without preloading saved frames (If re-running a video).")
     args = parser.parse_args()
+
+    if args.seed is not None:
+        random.seed(args.seed)
 
     project_root = args.base_dir
     annotations_root = project_root / "annotations"
     test_root = project_root / "test"
     system_files_dir = project_root / "system_files"
     output_dir = args.output_dir or (annotations_root / "data")
+
+    if output_dir.resolve().is_relative_to(annotations_root.resolve()):
+        other_split_root = test_root
+    elif output_dir.resolve().is_relative_to(test_root.resolve()):
+        other_split_root = annotations_root
+    else:
+        other_split_root = None
 
     app = QApplication(sys.argv)
     model = YOLO(args.weights)
@@ -788,27 +879,21 @@ def main():
     if args.video_path:
         candidates = []
         forced_video = Path(args.video_path)
+        auto_random = False
     elif args.box_video:
         candidates = []
         forced_video = Path(args.box_video)
+        auto_random = False
     else:
         candidates = select_random_box_video_names(
             navigator,
             count=random_count,
             folder_id=args.folder_id,
             rebuild_index=args.rebuild_index,
-            seed=args.seed,
+            seed=None,
         )
         forced_video = None
-        if not candidates:
-            raise SystemExit("No random videos available to download.")
-
-    if output_dir.resolve().is_relative_to(annotations_root.resolve()):
-        other_split_root = test_root
-    elif output_dir.resolve().is_relative_to(test_root.resolve()):
-        other_split_root = annotations_root
-    else:
-        other_split_root = None
+        auto_random = True
 
     window = FrameCurator(
         model=model,
@@ -819,6 +904,11 @@ def main():
         forced_video=forced_video,
         run_new=args.run_new,
         other_split_root=other_split_root,
+        auto_random=auto_random,
+        random_folder_id=args.folder_id,
+        random_rebuild_index=args.rebuild_index,
+        random_seed=None,
+        random_count=random_count,
     )
     window.show()
     sys.exit(app.exec_())

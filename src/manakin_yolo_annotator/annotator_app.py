@@ -3,8 +3,6 @@ import json
 import math
 import os
 import random
-import shutil
-import subprocess
 import numpy as np
 import librosa
 from PyQt5.QtWidgets import (
@@ -42,6 +40,7 @@ from .bounding_box import BoundingBoxItem, generate_color_for_id
 from .annotator_view import AnnotationView 
 from .inference import YOLOInferenceRunner 
 from .box_downloader import BoxNavigator
+from .random_vid import select_random_box_video_names, DEFAULT_BOX_FOLDER_ID
 
 
 PROJECT_ROOT = os.path.abspath(os.getcwd())
@@ -170,116 +169,44 @@ def confirm_cross_split(video_stem: str, video_name: str, other_root: str) -> bo
     response = input("Proceed anyway? [y/N]: ").strip().lower()
     return response in ("y", "yes")
 
-def create_random_snippet(video_path: str, duration_seconds: float = 5.0) -> str:
-    """
-    Create a random ~5s snippet with audio using stream copy (no re-encode).
-    Falls back to the original video if clipping fails or ffmpeg is unavailable.
-    """
+def is_grayscale_video_path(
+    video_path: str,
+    sample_count: int = 5,
+    diff_threshold: float = 0.5,
+) -> bool:
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        print(f"Could not open video at {video_path}, using original.")
-        return video_path
+        return False
 
-    fps = float(cap.get(cv2.CAP_PROP_FPS) or 30.0)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    cap.release()
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    if total <= 0:
+        cap.release()
+        return False
 
-    frames_needed = max(1, int(duration_seconds * fps))
-    if total_frames <= frames_needed or frame_width == 0 or frame_height == 0:
-        print(f"Video shorter than {duration_seconds}s; using full video.")
-        return video_path
-
-    start_frame = random.randint(0, total_frames - frames_needed)
-    actual_duration = min(duration_seconds, (total_frames - start_frame) / fps)
-
-    ffmpeg_bin = shutil.which("ffmpeg")
-    if not ffmpeg_bin:
-        print("ffmpeg not found; using original video.")
-        return video_path
-
-    snippet_dir = os.path.join(OUTPUT_ROOT, "video_snippets")
-    os.makedirs(snippet_dir, exist_ok=True)
-    snippet_name = f"{os.path.splitext(os.path.basename(video_path))[0]}_snippet_{start_frame}.mp4"
-    snippet_path = os.path.join(snippet_dir, snippet_name)
-
-    # Use stream copy to avoid re-encoding (fast, preserves quality and audio)
-    cmd = [
-        ffmpeg_bin,
-        "-y",
-        "-ss",
-        f"{start_frame / fps:.3f}",
-        "-t",
-        f"{actual_duration:.3f}",
-        "-i",
-        video_path,
-        "-c",
-        "copy",
-        "-movflags",
-        "+faststart",
-        snippet_path,
-    ]
-
-    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if result.returncode != 0:
-        print("ffmpeg failed to create snippet; using original video.")
-        return video_path
-
-    print(
-        f"Using random 5s snippet with audio: start_frame={start_frame}, "
-        f"duration={actual_duration:.2f}s saved to {snippet_path}"
+    indices = sorted(
+        set(
+            int(i * (total - 1) / max(sample_count - 1, 1))
+            for i in range(sample_count)
+        )
     )
-    return snippet_path
 
-SNIPPET_INFO_FILENAME = "snippet_info.json"
+    for idx in indices:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            continue
+        if frame.ndim < 3 or frame.shape[2] < 3:
+            continue
+        b = frame[:, :, 0].astype(np.int16)
+        g = frame[:, :, 1].astype(np.int16)
+        r = frame[:, :, 2].astype(np.int16)
+        diff = (np.mean(np.abs(b - g)) + np.mean(np.abs(b - r)) + np.mean(np.abs(g - r))) / 3.0
+        if diff > diff_threshold:
+            cap.release()
+            return False
 
-def _snippet_manifest_path(dataset_stem: str) -> str:
-    return os.path.join(DATASET_DIR, dataset_stem, SNIPPET_INFO_FILENAME)
-
-def load_snippet_from_manifest(dataset_stem: str) -> str:
-    """Return snippet path from manifest if it exists and is readable."""
-    manifest_path = _snippet_manifest_path(dataset_stem)
-    if not os.path.exists(manifest_path):
-        return None
-    try:
-        with open(manifest_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        candidate = data.get("snippet_path") or data.get("video_path")
-        if candidate and os.path.exists(candidate):
-            return candidate
-    except Exception as exc:
-        print(f"Failed to read snippet manifest at {manifest_path}: {exc}")
-    return None
-
-def save_snippet_manifest(dataset_stem: str, snippet_path: str, source_video_path: str = None):
-    """Persist the snippet used for annotation to reload cached datasets correctly."""
-    manifest_path = _snippet_manifest_path(dataset_stem)
-    try:
-        os.makedirs(os.path.dirname(manifest_path), exist_ok=True)
-        payload = {
-            "snippet_path": snippet_path,
-            "source_video_path": source_video_path or snippet_path,
-        }
-        with open(manifest_path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-    except Exception as exc:
-        print(f"Failed to save snippet manifest: {exc}")
-
-def find_existing_snippet(dataset_stem: str) -> str:
-    """Best-effort lookup for an existing snippet matching the dataset stem."""
-    snippet_dir = os.path.join(OUTPUT_ROOT, "video_snippets")
-    if not os.path.isdir(snippet_dir):
-        return None
-    candidates = [
-        os.path.join(snippet_dir, f)
-        for f in os.listdir(snippet_dir)
-        if f.startswith(f"{dataset_stem}_snippet_") and f.endswith(".mp4")
-    ]
-    if not candidates:
-        return None
-    # Pick most recently modified to favor the latest annotation run
-    return max(candidates, key=os.path.getmtime)
+    cap.release()
+    return True
 
 def probe_readable_frame_count(video_path: str, reported_frames: int) -> int:
     """
@@ -947,14 +874,13 @@ class JumpTimelineView(QGraphicsView):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, video_path, yolo_weights, save_video=False, save_clips=False, run_new=False, dataset_stem=None, source_video_path=None, write_snippet_manifest=False):
+    def __init__(self, video_path, yolo_weights, save_video=False, save_clips=False, run_new=False, dataset_stem=None, source_video_path=None):
         super().__init__()
         self.setWindowTitle("YOLO Video Annotator")
         self.setFocusPolicy(Qt.StrongFocus)
         self.save_video = save_video
         self.save_clips = save_clips
         self.run_new = run_new
-        self.write_snippet_manifest = write_snippet_manifest
 
         # --- 1. Video and YOLO Setup ---
         self.video_path = video_path
@@ -2017,10 +1943,6 @@ class MainWindow(QMainWindow):
             annotated_video_path = os.path.join(output_dir, f"{video_stem}_annotated.mp4")
             self.export_annotated_video(annotated_video_path)
 
-        # Record which snippet/full video these labels correspond to for future reloads
-        if self.write_snippet_manifest:
-            save_snippet_manifest(video_stem, self.video_path, self.source_video_path)
-
         # Persist jump windows manifest on explicit save
         self.save_jump_manifest()
 
@@ -2307,12 +2229,34 @@ def main():
         type=str,
         help='Exact Box filename to download and annotate (e.g., video.mp4).'
     )
+    source_group.add_argument(
+        '--random-vid',
+        action='store_true',
+        help='Pick a random Box video to download and annotate.'
+    )
     # Added argument for YOLO weights
     parser.add_argument(
         '--weights',
         type=str, 
         required=True, 
         help='The path to the YOLO model weights file (.pt).'
+    )
+    parser.add_argument(
+        '--folder-id',
+        type=str,
+        default=DEFAULT_BOX_FOLDER_ID,
+        help='Box folder ID for random sampling.',
+    )
+    parser.add_argument(
+        '--rebuild-index',
+        action='store_true',
+        help='Rebuild local Box index cache for the folder ID.',
+    )
+    parser.add_argument(
+        '--seed',
+        type=int,
+        default=None,
+        help='Optional random seed for reproducibility.',
     )
     parser.add_argument(
         '--save_video',
@@ -2329,11 +2273,6 @@ def main():
         type=str,
         default='.',
         help='Project root (controls annotations/, test/, and system_files/).',
-    )
-    parser.add_argument(
-        '--snippet',
-        action='store_true',
-        help='Create and annotate a ~5s snippet instead of the full video when no cached labels exist.',
     )
     split_group = parser.add_mutually_exclusive_group()
     split_group.add_argument(
@@ -2353,6 +2292,50 @@ def main():
     DATASET_DIR = os.path.join(OUTPUT_ROOT, "data")
     VIDEO_DIR = os.path.join(OUTPUT_ROOT, "videos")
     os.makedirs(OUTPUT_ROOT, exist_ok=True)
+    if args.seed is not None:
+        random.seed(args.seed)
+    resolved_video_path = None
+    confirmed_cross_split = False
+    other_root = ANNOTATIONS_ROOT if OUTPUT_ROOT == TEST_ROOT else TEST_ROOT
+    if args.random_vid:
+        navigator = BoxNavigator(
+            base_dir=OUTPUT_ROOT,
+            system_files_dir=SYSTEM_FILES_DIR,
+            download_dir=VIDEO_DIR,
+        )
+        attempts = 0
+        max_attempts = 25
+        while attempts < max_attempts:
+            candidates = select_random_box_video_names(
+                navigator,
+                count=1,
+                folder_id=args.folder_id,
+                rebuild_index=args.rebuild_index,
+                seed=None,
+            )
+            if not candidates:
+                break
+            name = candidates[0]
+            dataset_stem = os.path.splitext(name)[0]
+            if not confirm_cross_split(dataset_stem, name, other_root):
+                print("Aborted due to annotations/test conflict.")
+                sys.exit(1)
+            confirmed_cross_split = True
+            downloaded_path = navigator.download_vid(name)
+            if not downloaded_path:
+                attempts += 1
+                continue
+            if is_grayscale_video_path(downloaded_path):
+                print(f"[skip] {name} looks grayscale. Skipping.")
+                attempts += 1
+                continue
+            args.box_video = name
+            resolved_video_path = downloaded_path
+            print(f"Selected random Box video: {args.box_video}")
+            break
+        if resolved_video_path is None:
+            print("No non-grayscale random Box videos found after filtering (.mp4 only, no 'X' in name).")
+            sys.exit(1)
     app = QApplication(sys.argv)
     
     if args.video_path:
@@ -2360,39 +2343,17 @@ def main():
     else:
         candidate_name = args.box_video
     dataset_stem = os.path.splitext(candidate_name)[0]
-    other_root = ANNOTATIONS_ROOT if OUTPUT_ROOT == TEST_ROOT else TEST_ROOT
-    if not confirm_cross_split(dataset_stem, candidate_name, other_root):
-        print("Aborted due to annotations/test conflict.")
-        sys.exit(1)
-    try:
-        resolved_video_path = resolve_video_path(args.video_path, args.box_video)
-    except (FileNotFoundError, ValueError) as exc:
-        print(exc)
-        sys.exit(1)
-    cached_labels_dir = os.path.join(DATASET_DIR, dataset_stem, "labels")
-    has_cached_labels = (not args.run_new) and os.path.isdir(cached_labels_dir) and any(
-        f.endswith(".txt") for f in os.listdir(cached_labels_dir)
-    )
-
-    snippet_from_manifest = load_snippet_from_manifest(dataset_stem) if has_cached_labels else None
-    snippet_guess = find_existing_snippet(dataset_stem) if has_cached_labels and snippet_from_manifest is None else None
-
-    if has_cached_labels:
-        if snippet_from_manifest:
-            print(f"Cached labels found; using snippet from manifest: {snippet_from_manifest}")
-            video_to_use = snippet_from_manifest
-        elif snippet_guess:
-            print(f"Cached labels found; using latest snippet for {dataset_stem}: {snippet_guess}")
-            video_to_use = snippet_guess
-        else:
-            print(f"Cached labels found at {cached_labels_dir}, but no snippet located; using original video.")
-            video_to_use = resolved_video_path
-    else:
-        if args.snippet:
-            video_to_use = create_random_snippet(resolved_video_path, duration_seconds=5.0)
-        else:
-            print("No cached labels; processing full video (no snippet requested).")
-            video_to_use = resolved_video_path
+    if not confirmed_cross_split:
+        if not confirm_cross_split(dataset_stem, candidate_name, other_root):
+            print("Aborted due to annotations/test conflict.")
+            sys.exit(1)
+    if resolved_video_path is None:
+        try:
+            resolved_video_path = resolve_video_path(args.video_path, args.box_video)
+        except (FileNotFoundError, ValueError) as exc:
+            print(exc)
+            sys.exit(1)
+    video_to_use = resolved_video_path
 
     window = MainWindow(
         video_path=video_to_use,
@@ -2402,7 +2363,6 @@ def main():
         run_new=args.run_new,
         dataset_stem=dataset_stem,
         source_video_path=resolved_video_path,
-        write_snippet_manifest=args.snippet,
     ) 
     window.show()
     sys.exit(app.exec_())

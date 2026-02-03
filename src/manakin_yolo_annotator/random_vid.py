@@ -70,6 +70,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Download random videos from a Box folder.")
     parser.add_argument("--count", type=int, default=5, help="Number of random videos to download.")
     parser.add_argument("--base-dir", type=Path, default=Path("."), help="Project root (controls annotations/, test/, and system_files/).")
+    parser.add_argument(
+        "--download-dir",
+        type=Path,
+        default=None,
+        help="Override download directory (default: <split>/videos). Relative paths resolve from --base-dir.",
+    )
     parser.add_argument("--folder-id", type=str, default=DEFAULT_BOX_FOLDER_ID, help="Box folder ID to sample directly from Box.")
     parser.add_argument("--rebuild-index", action="store_true", help="Rebuild local Box index cache for the folder ID.")
     parser.add_argument("--seed", type=int, default=None, help="Optional random seed for reproducibility.")
@@ -100,7 +106,12 @@ def main():
     project_root = args.base_dir
     split_root = project_root / args.split
     other_root = project_root / ("test" if args.split == "annotations" else "annotations")
-    download_dir = split_root / "videos"
+    if args.download_dir is None:
+        download_dir = split_root / "videos"
+    else:
+        download_dir = args.download_dir
+        if not download_dir.is_absolute():
+            download_dir = project_root / download_dir
     system_files_dir = project_root / "system_files"
     navigator = BoxNavigator(
         base_dir=str(split_root),
